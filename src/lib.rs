@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bit_set::BitSet;
 use macroquad::{prelude::*, texture::Image};
 use ::rand::random_range;
@@ -6,7 +8,8 @@ const SCREEN_WIDTH: usize = 64;
 const SCREEN_HEIGHT: usize = 32;
 const MEMORY_BYTES: usize = 4096;
 const INITIAL_STACK_SIZE: usize = 64;
-const TARGET_OPS_PER_SECOND: u16 = 650;
+const TARGET_OPS_PER_SECOND: u16 = 500;
+const TIMER_HZ : f32 = 60.0;
 
 const ROM_LOAD_INDEX: usize = 0x0200; // Memory location where roms are loaded from
 
@@ -31,6 +34,13 @@ pub const STANDARD_FONT: FontData = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
+enum KeyState {
+    Inactive,
+    Active,
+    JustPressed,
+    JustReleased,
+}
+
 pub struct Emulator {
     memory: [u8; MEMORY_BYTES],
     registers: [u8; 16],
@@ -42,9 +52,11 @@ pub struct Emulator {
     sound_timer: u8,
 
     screen: BitSet,
+    key_states: HashMap<KeyCode, KeyState>,
 }
 
 impl Emulator {
+
     pub fn new() -> Emulator {
         Emulator {
             memory: [0; MEMORY_BYTES],
@@ -57,6 +69,24 @@ impl Emulator {
             sound_timer: 0,
 
             screen: BitSet::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT),
+            key_states: HashMap::from([
+                (KeyCode::Key1, KeyState::Inactive),
+                (KeyCode::Key2, KeyState::Inactive),
+                (KeyCode::Key3, KeyState::Inactive),
+                (KeyCode::Key4, KeyState::Inactive),
+                (KeyCode::Q,    KeyState::Inactive),
+                (KeyCode::W,    KeyState::Inactive),
+                (KeyCode::E,    KeyState::Inactive),
+                (KeyCode::R,    KeyState::Inactive),
+                (KeyCode::A,    KeyState::Inactive),
+                (KeyCode::S,    KeyState::Inactive),
+                (KeyCode::D,    KeyState::Inactive),
+                (KeyCode::F,    KeyState::Inactive),
+                (KeyCode::Z,    KeyState::Inactive),
+                (KeyCode::X,    KeyState::Inactive),
+                (KeyCode::C,    KeyState::Inactive),
+                (KeyCode::V,    KeyState::Inactive),
+            ]),
         }
     }
 
@@ -81,15 +111,49 @@ impl Emulator {
         let texture = Texture2D::from_image(&image);
         texture.set_filter(FilterMode::Nearest);
 
+        let mut awaiting_keypress = false;
+        let mut awaiting_keypress_register = 0x0;
+        
         let target_cycle_time = 1.0 / TARGET_OPS_PER_SECOND as f32;
         let mut update_time = 0.0;
 
+        let target_timer_time = 1.0 / TIMER_HZ;
+        let mut timer_time = 0.0;
+
         loop {
+            // Update the timers
+            timer_time -= get_frame_time();
+            while timer_time <= 0.0 {
+                timer_time += target_timer_time;
+
+                if let Some(new_delay_timer) = self.delay_timer.checked_sub(1) {
+                    self.delay_timer = new_delay_timer;
+                }
+
+                if let Some(new_sound_timer) = self.sound_timer.checked_sub(1) {
+                    self.sound_timer = new_sound_timer;
+                }
+            }
+
+            // Do actual CPU cycle updates
             update_time -= get_frame_time();
             clear_background(BLACK);
 
             while update_time <= 0.0 {
                 update_time += target_cycle_time;
+
+                self.update_key_states();
+
+                if awaiting_keypress {
+                    match self.get_awaited_key() {
+                        Some(keycode) => {
+                            self.registers[awaiting_keypress_register] = keycode;
+                            awaiting_keypress = false;
+                            awaiting_keypress_register = 0x0;
+                        },
+                        None => continue,
+                    }
+                }
 
                 // Grab the next instruction and increment the program counter
                 let high = self.memory[self.program_counter] as u16;
@@ -124,7 +188,7 @@ impl Emulator {
                     0x3000..=0x3FFF => if self.registers[x] == nn { self.program_counter += 2; },
                     // 4XNN Cond - Skips the next instruction if VX does not equal NN
                     0x4000..=0x4FFF => if self.registers[x] != nn { self.program_counter += 2; },
-                    // 5XY0 Cond - Skips the next instruction if VX does not equal NN
+                    // 5XY0 Cond - Skips the next instruction if VX equals VY
                     0x5000..=0x5FFF => if self.registers[x] == self.registers[y] { self.program_counter += 2; },
                     // 6XNN Const - Set VX to NN
                     0x6000..=0x6FFF => self.registers[x] = nn,
@@ -135,36 +199,51 @@ impl Emulator {
                         // 8XY0 Assign - Sets VX to the value of VY
                         0x0 => self.registers[x] = self.registers[y],
                         // 8XY1 BitOp - Sets VX to VX | VY
-                        0x1 => self.registers[x] = self.registers[x] | self.registers[y],
+                        0x1 => { 
+                            self.registers[x] = self.registers[x] | self.registers[y];
+                            // self.registers[0xF] = 0; // Quirk for CHIP-8, make configurable
+                        },
                         // 8XY2 BitOp - Sets VX to VX & VY
-                        0x2 => self.registers[x] = self.registers[x] & self.registers[y],
+                        0x2 => {
+                            self.registers[x] = self.registers[x] & self.registers[y];
+                            // self.registers[0xF] = 0; // Quirk for CHIP-8, make configurable
+                        },
                         // 8XY3 BitOp - Sets VX to VX ^ VY
-                        0x3 => self.registers[x] = self.registers[x] ^ self.registers[y],
+                        0x3 => {
+                            self.registers[x] = self.registers[x] ^ self.registers[y];
+                            // self.registers[0xF] = 0; // Quirk for CHIP-8, make configurable
+                        },
                         // 8XY4 Math - Adds VY to VX, setting VF if there's an overflow
                         0x4 => {
                             let result = self.registers[x] as u16 + self.registers[y] as u16;
-                            self.registers[0xF] =  if result > 0xFF { 1 } else { 0 };
                             self.registers[x] = self.registers[x].wrapping_add(self.registers[y]);
+                            self.registers[0xF] =  if result > 0xFF { 1 } else { 0 };
                         },
                         // 8XY5 Math - Subtracts VY from VX. Sets VF to 0 if underflow, 1 otherwise
                         0x5 => {
-                            self.registers[0xF] = if self.registers[x] >= self.registers[y] { 1 } else { 0 };
+                            let vf_result = if self.registers[x] >= self.registers[y] { 1 } else { 0 };
                             self.registers[x] = self.registers[x].wrapping_sub(self.registers[y]);
+                            self.registers[0xF] = vf_result;
                         },
                         // 8XY6 BitOp - Shifts VX to the right by 1, setting VF to the shifted bit
                         0x6 => {
-                            self.registers[0xF] = self.registers[x] & 1;
+                            let vf_result = self.registers[x] & 1;
                             self.registers[x] >>= 1;
+                            self.registers[0xF] = vf_result;
                         },
                         // 8XY7 Math - Sets VX to VY - VX. Sets VF to 0 if underflow, 1 otherwise
                         0x7 => {
-                            self.registers[0xF] = if self.registers[y] >= self.registers[x] { 1 } else { 0 };
+                            let vf_result = if self.registers[y] >= self.registers[x] { 1 } else { 0 };
                             self.registers[x] = self.registers[y].wrapping_sub(self.registers[x]);
+                            self.registers[0xF] = vf_result;
                         },
                         // 8XYE BitOp - Shifts VX to the left by 1, setting VF to the shifted bit
                         0xE => {
-                            self.registers[0xF] = self.registers[x] & (1 << 7);
-                            self.registers[x] = self.registers[x].wrapping_shl(1);
+                            // TODO: the following line is a quirk on some systems, make it configurable
+                            // self.registers[x] = self.registers[y];
+                            let vf_result = (self.registers[x] >> 7) & 1;
+                            self.registers[x] <<= 1;
+                            self.registers[0xF] = vf_result;
                         },
                         _ => eprintln!("Unrecognized instruction: {instruction:#04X}"),
                     },
@@ -173,7 +252,14 @@ impl Emulator {
                     // ANNN MEM - Sets the I to the address NNN
                     0xA000..=0xAFFF => self.index_register = nnn,
                     // BNNN Flow - Jumps to the address NNN + V0
-                    0xB000..=0xBFFF => self.program_counter = self.memory[nnn] as usize + self.registers[0] as usize,
+                    0xB000..=0xBFFF => {
+                        // TODO: Make configurable
+                        // Original CHIP-8 behavior:
+                        // self.program_counter = nnn + self.registers[0] as usize;
+
+                        // CHIP-48/SUPER-CHIP
+                        self.program_counter = nnn + self.registers[x] as usize;
+                    }
                     // CXNN Rand - Sets VX to the result of a bitwise AND operation on a random u8 number and NN
                     0xC000..=0xCFFF => {
                         let num = random_range(0..=255) as u8;
@@ -187,13 +273,30 @@ impl Emulator {
                         self.draw(x_coord, y_coord, height);
                     },
                     // E... Keys and Input
-                    0xE000..=0xEFFF => todo!(),
+                    0xE000..=0xEFFF => {
+                        let keycode = Self::key_value_to_keycode(&(self.registers[x] & 0xF))
+                            .expect(format!("Expected valid keycode in op: {instruction:#04X}").as_str());
+                        match nn {
+                            // EX9E KeyOp - Skip if key pressed
+                            0x9E => if let KeyState::Active | KeyState::JustPressed = self.key_states[&keycode] {
+                                self.program_counter += 2;
+                            },
+                            // EXA1 KeyOp - Skip if not pressed
+                            0xA1 => if let KeyState::Inactive | KeyState::JustReleased = self.key_states[&keycode] {
+                                self.program_counter += 2;
+                            },
+                            _ => eprintln!("Unrecognized instruction: {instruction:#04X}"),
+                        }
+                    },
                     // F... Memory and Devices
                     0xF000..=0xFFFF => match nn {
                         // FX07 Timer - Sets VX to the value of the delay timer
                         0x07 => self.registers[x] = self.delay_timer,
                         // FX0A KeyOp - A key press is awaited and then stored in VX (blocking operation)
-                        0x0A => todo!(),
+                        0x0A => {
+                            awaiting_keypress = true;
+                            awaiting_keypress_register = x;
+                        },
                         // FX15 Timer - Sets the delay timer to VX
                         0x15 => self.delay_timer = self.registers[x],
                         // FX18 Sound - Sets the sound timer to VX
@@ -201,7 +304,7 @@ impl Emulator {
                         // FX1E MEM - Adds VX to I.
                         0x1E => self.index_register += self.registers[x] as usize,
                         // FX29 MEM - Sets I to the location of the sprite for the character in VX
-                        0x29 => self.index_register = FONT_LOAD_INDEX + x,
+                        0x29 => self.index_register = FONT_LOAD_INDEX + (x * 5),
                         // FX33 BCD - Stores the binary-coded decimal representation of VX in memory using the index register
                         0x33 => {
                             let hundreds = self.registers[x] / 100;
@@ -261,6 +364,10 @@ impl Emulator {
 
         // Loop through all the "rows" of the sprite
         for sprite_y in 0..height {
+            if sprite_y + y >= SCREEN_HEIGHT as u8 {
+                return;
+            }
+
             // Compute the address of the data and fetch it
             let address = self.index_register + sprite_y as usize;
             let sprite_data = self.memory[address];
@@ -270,6 +377,10 @@ impl Emulator {
                 let draw_x = x + sprite_x;
                 let draw_y = y + sprite_y;
                 let draw_v = (sprite_data >> (7 - sprite_x)) & 1;
+
+                if draw_x >= SCREEN_WIDTH as u8 {
+                    continue;
+                }
 
                 // Flip the bits based on the sprite data
                 if draw_v == 1 {
@@ -289,11 +400,86 @@ impl Emulator {
         }
     }
 
+    fn update_key_states(&mut self) {
+        for (keycode, state) in self.key_states.iter_mut() {
+            if is_key_down(*keycode) {
+                match state {
+                    KeyState::Inactive
+                    | KeyState::JustReleased => *state = KeyState::JustPressed,
+                    KeyState::JustPressed => *state = KeyState::Active,
+                    KeyState::Active => {}, // no-op
+                }
+            }
+            else {
+                match state {
+                    KeyState::Active
+                    | KeyState::JustPressed => *state = KeyState::JustReleased,
+                    KeyState::JustReleased => *state = KeyState::Inactive,
+                    KeyState::Inactive => {}, // no-op
+                }
+            }
+        }
+    }
+    
+    fn get_awaited_key(&self) -> Option<u8> {
+        for (keycode, state) in self.key_states.iter() {
+            if let KeyState::JustPressed = state {
+                return Self::keycode_to_key_value(&keycode);
+            }
+        }
+
+        None
+    }
+
     fn screen_to_flat(x: u8, y: u8) -> usize {
         (y as usize * SCREEN_WIDTH) + x as usize
     }
 
     fn flat_to_screen(bit: usize) -> (u8, u8) {
         ((bit % SCREEN_WIDTH) as u8, (bit / SCREEN_WIDTH) as u8)
+    }
+
+    fn keycode_to_key_value(keycode: &KeyCode) -> Option<u8> {
+        match keycode {
+            KeyCode::Key1 => Some(0x1),
+            KeyCode::Key2 => Some(0x2),
+            KeyCode::Key3 => Some(0x3),
+            KeyCode::Key4 => Some(0xC),
+            KeyCode::Q    => Some(0x4),
+            KeyCode::W    => Some(0x5),
+            KeyCode::E    => Some(0x6),
+            KeyCode::R    => Some(0xD),
+            KeyCode::A    => Some(0x7),
+            KeyCode::S    => Some(0x8),
+            KeyCode::D    => Some(0x9),
+            KeyCode::F    => Some(0xE),
+            KeyCode::Z    => Some(0xA),
+            KeyCode::X    => Some(0x0),
+            KeyCode::C    => Some(0xB),
+            KeyCode::V    => Some(0xF),
+            _ => None,
+        }
+    }
+
+    fn key_value_to_keycode(key_value: &u8) -> Option<KeyCode> {
+        match key_value {
+            0x1 => Some(KeyCode::Key1),
+            0x2 => Some(KeyCode::Key2),
+            0x3 => Some(KeyCode::Key3),
+            0xC => Some(KeyCode::Key4),
+            0x4 => Some(KeyCode::Q),
+            0x5 => Some(KeyCode::W),
+            0x6 => Some(KeyCode::E),
+            0xD => Some(KeyCode::R),
+            0x7 => Some(KeyCode::A),
+            0x8 => Some(KeyCode::S),
+            0x9 => Some(KeyCode::D),
+            0xE => Some(KeyCode::F),
+            0xA => Some(KeyCode::Z),
+            0x0 => Some(KeyCode::X),
+            0xB => Some(KeyCode::C),
+            0xF => Some(KeyCode::V),
+            _ => None
+        }
     }
 }
