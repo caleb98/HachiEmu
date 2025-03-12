@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use bit_set::BitSet;
 use macroquad::{prelude::*, texture::Image};
 use ::rand::random_range;
@@ -8,7 +6,9 @@ const SCREEN_WIDTH: usize = 64;
 const SCREEN_HEIGHT: usize = 32;
 const MEMORY_BYTES: usize = 4096;
 const INITIAL_STACK_SIZE: usize = 64;
-const TARGET_OPS_PER_SECOND: u16 = 650;
+const TARGET_OPS_PER_SECOND: u16 = 550;
+const NUM_INPUT_KEYS: usize = 16;
+
 const TIMER_HZ : f32 = 60.0;
 
 const ROM_LOAD_INDEX: usize = 0x0200; // Memory location where roms are loaded from
@@ -34,13 +34,6 @@ pub const STANDARD_FONT: FontData = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
-enum KeyState {
-    Inactive,
-    Active,
-    JustPressed,
-    JustReleased,
-}
-
 pub struct Emulator {
     memory: [u8; MEMORY_BYTES],
     registers: [u8; 16],
@@ -52,9 +45,11 @@ pub struct Emulator {
     sound_timer: u8,
 
     screen: BitSet,
-    key_states: HashMap<KeyCode, KeyState>,
+    key_states: [bool; NUM_INPUT_KEYS],
     awaiting_keypress: bool,
     awaiting_keypress_register: usize,
+    awaiting_keyrelease: bool,
+    awaiting_keyelease_key_value: u8,
 }
 
 impl Emulator {
@@ -71,26 +66,11 @@ impl Emulator {
             sound_timer: 0,
 
             screen: BitSet::with_capacity(SCREEN_WIDTH * SCREEN_HEIGHT),
-            key_states: HashMap::from([
-                (KeyCode::Key1, KeyState::Inactive),
-                (KeyCode::Key2, KeyState::Inactive),
-                (KeyCode::Key3, KeyState::Inactive),
-                (KeyCode::Key4, KeyState::Inactive),
-                (KeyCode::Q,    KeyState::Inactive),
-                (KeyCode::W,    KeyState::Inactive),
-                (KeyCode::E,    KeyState::Inactive),
-                (KeyCode::R,    KeyState::Inactive),
-                (KeyCode::A,    KeyState::Inactive),
-                (KeyCode::S,    KeyState::Inactive),
-                (KeyCode::D,    KeyState::Inactive),
-                (KeyCode::F,    KeyState::Inactive),
-                (KeyCode::Z,    KeyState::Inactive),
-                (KeyCode::X,    KeyState::Inactive),
-                (KeyCode::C,    KeyState::Inactive),
-                (KeyCode::V,    KeyState::Inactive),
-            ]),
+            key_states: [false; NUM_INPUT_KEYS],
             awaiting_keypress: false,
             awaiting_keypress_register: 0,
+            awaiting_keyrelease: false,
+            awaiting_keyelease_key_value: 0,
         }
     }
 
@@ -122,6 +102,13 @@ impl Emulator {
         let mut timer_time = 0.0;
 
         loop {
+            // Update input states
+            for key_index in 0..NUM_INPUT_KEYS {
+                let keycode = Self::key_value_to_keycode(key_index as u8)
+                    .expect("Expected valid key index.");
+                self.key_states[key_index] = is_key_down(keycode);
+            }
+
             // Update the timers
             timer_time -= get_frame_time();
             while timer_time <= 0.0 {
@@ -135,21 +122,38 @@ impl Emulator {
                     self.sound_timer = new_sound_timer;
                 }
             }
-
-            // Do actual CPU cycle updates
+            
+            // Perform CPU Cycles
             update_time -= get_frame_time();
-            clear_background(BLACK);
-            self.update_key_states();
-
             while update_time <= 0.0 {
                 update_time += target_cycle_time;
 
+                if self.awaiting_keyrelease {
+                    println!("Awaiting keyrelease...");
+                    if is_key_down(Self::key_value_to_keycode(self.awaiting_keyelease_key_value)
+                        .expect("Expected valid keypress register."))
+                    {
+                        continue;
+                    }
+
+                    self.awaiting_keyrelease = false;
+                    self.awaiting_keyelease_key_value = 0;
+                }
+
                 if self.awaiting_keypress {
+                    println!("Awaiting keypress...");
                     match self.get_awaited_key() {
-                        Some(keycode) => {
-                            self.registers[self.awaiting_keypress_register] = keycode;
+                        Some(key_index) => {
+                            self.registers[self.awaiting_keypress_register] = key_index;
+                            // Done awaiting press...
                             self.awaiting_keypress = false;
                             self.awaiting_keypress_register = 0;
+
+                            // ...now await release.
+                            self.awaiting_keyrelease = true;
+                            self.awaiting_keyelease_key_value = key_index;
+
+                            continue; // need to continue to await the release
                         },
                         None => continue,
                     }
@@ -200,8 +204,8 @@ impl Emulator {
                     (0xB,   _,   _,   _) => self.op_bnnn(x, nnn), // BNNN Flow - Jumps to the address NNN + V0
                     (0xC,   _,   _,   _) => self.op_cxnn(x, nn), // CXNN Rand - Sets VX to the result of a bitwise AND operation on a random u8 number and NN
                     (0xD,   _,   _,   _) => self.op_dxyn(x, y, n), // DXYN Display - Draws a sprite at coordinate (VX, VY)
-                    (0xE,   _, 0x9, 0xE) => self.op_ex9e(x, instruction), // EX9E KeyOp - Skip if key pressed
-                    (0xE,   _, 0xA, 0x1) => self.op_exa1(x, instruction), // EXA1 KeyOp - Skip if not pressed
+                    (0xE,   _, 0x9, 0xE) => self.op_ex9e(x), // EX9E KeyOp - Skip if key pressed
+                    (0xE,   _, 0xA, 0x1) => self.op_exa1(x), // EXA1 KeyOp - Skip if not pressed
                     (0xF,   _, 0x0, 0x7) => self.op_fx07(x), // FX07 Timer - Sets VX to the value of the delay timer
                     (0xF,   _, 0x0, 0xA) => self.op_fx0a(x), // FX0A KeyOp - A key press is awaited and then stored in VX (blocking operation)
                     (0xF,   _, 0x1, 0x5) => self.op_fx15(x), // FX15 Timer - Sets the delay timer to VX
@@ -226,6 +230,9 @@ impl Emulator {
                     }
                 }   
             }
+
+            // Redraw the window graphics
+            clear_background(BLACK);
 
             texture.update(&image);
             draw_texture_ex(&texture, 0.0, 0.0, WHITE, DrawTextureParams {
@@ -287,20 +294,14 @@ impl Emulator {
         self.registers[x] = self.delay_timer
     }
     
-    fn op_exa1(&mut self, x: usize, instruction: u16) {
-        let keycode = Self::key_value_to_keycode(&(self.registers[x] & 0xF))
-            .expect(format!("Expected valid keycode in op: {instruction:#04X}").as_str());
-
-        if let KeyState::Inactive | KeyState::JustReleased = self.key_states[&keycode] {
+    fn op_exa1(&mut self, x: usize) {
+        if !self.key_states[self.registers[x] as usize] {
             self.program_counter += 2;
         }
     }
     
-    fn op_ex9e(&mut self, x: usize, instruction: u16) {
-        let keycode = Self::key_value_to_keycode(&(self.registers[x] & 0xF))
-            .expect(format!("Expected valid keycode in op: {instruction:#04X}").as_str());
-
-        if let KeyState::Active | KeyState::JustPressed = self.key_states[&keycode] {
+    fn op_ex9e(&mut self, x: usize) {
+        if self.key_states[self.registers[x] as usize] {
             self.program_counter += 2;
         }
     }
@@ -465,32 +466,11 @@ impl Emulator {
             }
         }
     }
-
-    fn update_key_states(&mut self) {
-        for (keycode, state) in self.key_states.iter_mut() {
-            if is_key_down(*keycode) {
-                match state {
-                    KeyState::Inactive
-                    | KeyState::JustReleased => *state = KeyState::JustPressed,
-                    KeyState::JustPressed => *state = KeyState::Active,
-                    KeyState::Active => {}, // no-op
-                }
-            }
-            else {
-                match state {
-                    KeyState::Active
-                    | KeyState::JustPressed => *state = KeyState::JustReleased,
-                    KeyState::JustReleased => *state = KeyState::Inactive,
-                    KeyState::Inactive => {}, // no-op
-                }
-            }
-        }
-    }
     
     fn get_awaited_key(&self) -> Option<u8> {
-        for (keycode, state) in self.key_states.iter() {
-            if let KeyState::JustPressed = state {
-                return Self::keycode_to_key_value(&keycode);
+        for key_index in 0..self.key_states.len() {
+            if self.key_states[key_index] {
+                return Some(key_index as u8);
             }
         }
 
@@ -505,29 +485,29 @@ impl Emulator {
         ((bit % SCREEN_WIDTH) as u8, (bit / SCREEN_WIDTH) as u8)
     }
 
-    fn keycode_to_key_value(keycode: &KeyCode) -> Option<u8> {
-        match keycode {
-            KeyCode::Key1 => Some(0x1),
-            KeyCode::Key2 => Some(0x2),
-            KeyCode::Key3 => Some(0x3),
-            KeyCode::Key4 => Some(0xC),
-            KeyCode::Q    => Some(0x4),
-            KeyCode::W    => Some(0x5),
-            KeyCode::E    => Some(0x6),
-            KeyCode::R    => Some(0xD),
-            KeyCode::A    => Some(0x7),
-            KeyCode::S    => Some(0x8),
-            KeyCode::D    => Some(0x9),
-            KeyCode::F    => Some(0xE),
-            KeyCode::Z    => Some(0xA),
-            KeyCode::X    => Some(0x0),
-            KeyCode::C    => Some(0xB),
-            KeyCode::V    => Some(0xF),
-            _ => None,
-        }
-    }
+    // fn keycode_to_key_value(keycode: KeyCode) -> Option<u8> {
+    //     match keycode {
+    //         KeyCode::Key1 => Some(0x1),
+    //         KeyCode::Key2 => Some(0x2),
+    //         KeyCode::Key3 => Some(0x3),
+    //         KeyCode::Key4 => Some(0xC),
+    //         KeyCode::Q    => Some(0x4),
+    //         KeyCode::W    => Some(0x5),
+    //         KeyCode::E    => Some(0x6),
+    //         KeyCode::R    => Some(0xD),
+    //         KeyCode::A    => Some(0x7),
+    //         KeyCode::S    => Some(0x8),
+    //         KeyCode::D    => Some(0x9),
+    //         KeyCode::F    => Some(0xE),
+    //         KeyCode::Z    => Some(0xA),
+    //         KeyCode::X    => Some(0x0),
+    //         KeyCode::C    => Some(0xB),
+    //         KeyCode::V    => Some(0xF),
+    //         _ => None,
+    //     }
+    // }
 
-    fn key_value_to_keycode(key_value: &u8) -> Option<KeyCode> {
+    fn key_value_to_keycode(key_value: u8) -> Option<KeyCode> {
         match key_value {
             0x1 => Some(KeyCode::Key1),
             0x2 => Some(KeyCode::Key2),
