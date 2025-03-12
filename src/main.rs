@@ -20,7 +20,7 @@ async fn main() {
     let mut emulator = Emulator::new();
     emulator.load_font(&hachi_emu::STANDARD_FONT);
 
-    let program = std::fs::read("roms/5-quirks.ch8").unwrap();
+    let program = std::fs::read("roms/6-keypad.ch8").unwrap();
     emulator.load_program(&program);
 
     emulator.run().await;

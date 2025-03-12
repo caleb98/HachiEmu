@@ -41,7 +41,6 @@ enum KeyState {
     JustReleased,
 }
 
-
 pub struct Emulator {
     memory: [u8; MEMORY_BYTES],
     registers: [u8; 16],
@@ -54,6 +53,8 @@ pub struct Emulator {
 
     screen: BitSet,
     key_states: HashMap<KeyCode, KeyState>,
+    awaiting_keypress: bool,
+    awaiting_keypress_register: usize,
 }
 
 impl Emulator {
@@ -88,6 +89,8 @@ impl Emulator {
                 (KeyCode::C,    KeyState::Inactive),
                 (KeyCode::V,    KeyState::Inactive),
             ]),
+            awaiting_keypress: false,
+            awaiting_keypress_register: 0,
         }
     }
 
@@ -111,9 +114,6 @@ impl Emulator {
         let mut image = Image::gen_image_color(SCREEN_WIDTH as u16, SCREEN_HEIGHT as u16, BLACK);
         let texture = Texture2D::from_image(&image);
         texture.set_filter(FilterMode::Nearest);
-
-        let mut awaiting_keypress = false;
-        let mut awaiting_keypress_register = 0x0;
         
         let target_cycle_time = 1.0 / TARGET_OPS_PER_SECOND as f32;
         let mut update_time = 0.0;
@@ -139,18 +139,17 @@ impl Emulator {
             // Do actual CPU cycle updates
             update_time -= get_frame_time();
             clear_background(BLACK);
+            self.update_key_states();
 
             while update_time <= 0.0 {
                 update_time += target_cycle_time;
 
-                self.update_key_states();
-
-                if awaiting_keypress {
+                if self.awaiting_keypress {
                     match self.get_awaited_key() {
                         Some(keycode) => {
-                            self.registers[awaiting_keypress_register] = keycode;
-                            awaiting_keypress = false;
-                            awaiting_keypress_register = 0x0;
+                            self.registers[self.awaiting_keypress_register] = keycode;
+                            self.awaiting_keypress = false;
+                            self.awaiting_keypress_register = 0;
                         },
                         None => continue,
                     }
@@ -204,10 +203,7 @@ impl Emulator {
                     (0xE,   _, 0x9, 0xE) => self.op_ex9e(x, instruction), // EX9E KeyOp - Skip if key pressed
                     (0xE,   _, 0xA, 0x1) => self.op_exa1(x, instruction), // EXA1 KeyOp - Skip if not pressed
                     (0xF,   _, 0x0, 0x7) => self.op_fx07(x), // FX07 Timer - Sets VX to the value of the delay timer
-                    (0xF,   _, 0x0, 0xA) => { // FX0A KeyOp - A key press is awaited and then stored in VX (blocking operation)
-                        awaiting_keypress = true;
-                        awaiting_keypress_register = x;
-                    },
+                    (0xF,   _, 0x0, 0xA) => self.op_fx0a(x), // FX0A KeyOp - A key press is awaited and then stored in VX (blocking operation)
                     (0xF,   _, 0x1, 0x5) => self.op_fx15(x), // FX15 Timer - Sets the delay timer to VX
                     (0xF,   _, 0x1, 0x8) => self.op_fx18(x), // FX18 Timer - Sets the sound timer to VX
                     (0xF,   _, 0x1, 0xE) => self.op_fx1e(x), // FX1E MEM - Adds VX to I.
@@ -234,7 +230,6 @@ impl Emulator {
             texture.update(&image);
             draw_texture_ex(&texture, 0.0, 0.0, WHITE, DrawTextureParams {
                 dest_size: Some(Vec2 { x: screen_width(), y: screen_height() }),
-                // dest_size: None,
                 source: None,
                 rotation: 0.0,
                 flip_x: false,
@@ -246,6 +241,11 @@ impl Emulator {
         }
     }
 
+    fn op_fx0a(&mut self, x: usize) {
+        self.awaiting_keypress = true;
+        self.awaiting_keypress_register = x;
+    }
+    
     fn op_fx65(&mut self, x: usize) {
         for register in 0..=x {
             self.registers[register] = self.memory[self.index_register + register];
