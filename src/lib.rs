@@ -1,6 +1,6 @@
+use ::rand::random_range;
 use bit_set::BitSet;
 use macroquad::{prelude::*, texture::Image};
-use ::rand::random_range;
 
 const SCREEN_WIDTH: usize = 64;
 const SCREEN_HEIGHT: usize = 32;
@@ -9,7 +9,7 @@ const INITIAL_STACK_SIZE: usize = 64;
 const TARGET_OPS_PER_SECOND: u16 = 550;
 const NUM_INPUT_KEYS: usize = 16;
 
-const TIMER_HZ : f32 = 60.0;
+const TIMER_HZ: f32 = 60.0;
 
 const ROM_LOAD_INDEX: usize = 0x0200; // Memory location where roms are loaded from
 
@@ -53,7 +53,6 @@ pub struct Emulator {
 }
 
 impl Emulator {
-
     pub fn new() -> Emulator {
         Emulator {
             memory: [0; MEMORY_BYTES],
@@ -94,7 +93,7 @@ impl Emulator {
         let mut image = Image::gen_image_color(SCREEN_WIDTH as u16, SCREEN_HEIGHT as u16, BLACK);
         let texture = Texture2D::from_image(&image);
         texture.set_filter(FilterMode::Nearest);
-        
+
         let target_cycle_time = 1.0 / TARGET_OPS_PER_SECOND as f32;
         let mut update_time = 0.0;
 
@@ -104,8 +103,8 @@ impl Emulator {
         loop {
             // Update input states
             for key_index in 0..NUM_INPUT_KEYS {
-                let keycode = Self::key_value_to_keycode(key_index as u8)
-                    .expect("Expected valid key index.");
+                let keycode =
+                    Self::key_value_to_keycode(key_index as u8).expect("Expected valid key index.");
                 self.key_states[key_index] = is_key_down(keycode);
             }
 
@@ -122,7 +121,7 @@ impl Emulator {
                     self.sound_timer = new_sound_timer;
                 }
             }
-            
+
             // Perform CPU Cycles
             update_time -= get_frame_time();
             while update_time <= 0.0 {
@@ -130,9 +129,10 @@ impl Emulator {
 
                 if self.awaiting_keyrelease {
                     println!("Awaiting keyrelease...");
-                    if is_key_down(Self::key_value_to_keycode(self.awaiting_keyelease_key_value)
-                        .expect("Expected valid keypress register."))
-                    {
+                    if is_key_down(
+                        Self::key_value_to_keycode(self.awaiting_keyelease_key_value)
+                            .expect("Expected valid keypress register."),
+                    ) {
                         continue;
                     }
 
@@ -154,7 +154,7 @@ impl Emulator {
                             self.awaiting_keyelease_key_value = key_index;
 
                             continue; // need to continue to await the release
-                        },
+                        }
                         None => continue,
                     }
                 }
@@ -164,87 +164,98 @@ impl Emulator {
                 let low = self.memory[self.program_counter + 1] as u16;
                 let instruction = (high << 8) | low;
                 self.program_counter += 2;
-    
+
                 // Extract some common pieces of the instruction
-                let x      = ((instruction & 0x0F00) >> 8) as usize; // 4-bit register id
-                let y      = ((instruction & 0x00F0) >> 4) as usize; // 4-bit register id
-                let n      = ((instruction & 0x000F) >> 0) as u8;    // 4-bit constant
-                let nn     = ((instruction & 0x00FF) >> 0) as u8;    // 8-bit constant
-                let nnn    = ((instruction & 0x0FFF) >> 0) as usize; // address
+                let x = ((instruction & 0x0F00) >> 8) as usize; // 4-bit register id
+                let y = ((instruction & 0x00F0) >> 4) as usize; // 4-bit register id
+                let n = (instruction & 0x000F) as u8; // 4-bit constant
+                let nn = (instruction & 0x00FF) as u8; // 8-bit constant
+                let nnn = (instruction & 0x0FFF) as usize; // address
 
                 let nibbles = (
-                    (instruction & 0xF000) >> 12 as u8,
-                    (instruction & 0x0F00) >>  8 as u8,
-                    (instruction & 0x00F0) >>  4 as u8,
-                    (instruction & 0x000F) >>  0 as u8,
+                    (instruction & 0xF000) >> 12,
+                    (instruction & 0x0F00) >> 8,
+                    (instruction & 0x00F0) >> 4,
+                    (instruction & 0x000F),
                 );
-        
+
                 match nibbles {
                     (0x0, 0x0, 0xE, 0x0) => self.op_00e0(), // 00E0 Display - Clears the screen
                     (0x0, 0x0, 0xE, 0xE) => self.op_00ee(), // 00EE Flow - Return from subroutine
-                    (0x0, 0x1,   _,   _) => self.op_0nnn(), // 0NNN Call - Calls a machine code routine
-                    (0x1,   _,   _,   _) => self.op_1nnn(nnn), // 1NNN Flow - Goto NNN
-                    (0x2,   _,   _,   _) => self.op_2nnn(nnn), // 2NNN Flow - Calls subroutine at NNN
-                    (0x3,   _,   _,   _) => self.op_3xnn(x, nn), // 3XNN Cond - Skips the next instruction if VX equals NN
-                    (0x4,   _,   _,   _) => self.op_4xnn(x, nn), // 4XNN Cond - Skips the next instruction if VX does not equal NN
-                    (0x5,   _,   _,   _) => self.op_5xy0(x, y), // 5XY0 Cond - Skips the next instruction if VX equals VY
-                    (0x6,   _,   _,   _) => self.op_6xnn(x, nn), // 6XNN Const - Set VX to NN
-                    (0x7,   _,   _,   _) => self.op_7xnn(x, nn), // 7XNN Const - Adds NN to VX
-                    (0x8,   _,   _, 0x0) => self.op_8xy0(x, y), // 8XY0 Assign - Sets VX to the value of VY
-                    (0x8,   _,   _, 0x1) => self.op_8xy1(x, y), // 8XY1 BitOp - Sets VX to VX | VY
-                    (0x8,   _,   _, 0x2) => self.op_8xy2(x, y), // 8XY2 BitOp - Sets VX to VX & VY
-                    (0x8,   _,   _, 0x3) => self.op_8xy3(x, y), // 8XY3 BitOp - Sets VX to VX ^ VY
-                    (0x8,   _,   _, 0x4) => self.op_8xy4(x, y), // 8XY4 Math - Adds VY to VX, setting VF if there's an overflow
-                    (0x8,   _,   _, 0x5) => self.op_8xy5(x, y), // 8XY5 Math - Subtracts VY from VX. Sets VF to 0 if underflow, 1 otherwise
-                    (0x8,   _,   _, 0x6) => self.op_8xy6(x), // 8XY6 BitOp - Shifts VX to the right by 1, setting VF to the shifted bit
-                    (0x8,   _,   _, 0x7) => self.op_8xy7(x, y), // 8XY7 Math - Sets VX to VY - VX. Sets VF to 0 if underflow, 1 otherwise
-                    (0x8,   _,   _, 0xE) => self.op_8xye(x), // 8XYE BitOp - Shifts VX to the left by 1, setting VF to the shifted bit
-                    (0x9,   _,   _,   _) => self.op_9xy0(x, y), // 9XY0 Cond - Skips the next instruction if VX does not equal VY
-                    (0xA,   _,   _,   _) => self.op_annn(nnn), // ANNN MEM - Sets the I to the address NNN
-                    (0xB,   _,   _,   _) => self.op_bnnn(x, nnn), // BNNN Flow - Jumps to the address NNN + V0
-                    (0xC,   _,   _,   _) => self.op_cxnn(x, nn), // CXNN Rand - Sets VX to the result of a bitwise AND operation on a random u8 number and NN
-                    (0xD,   _,   _,   _) => self.op_dxyn(x, y, n), // DXYN Display - Draws a sprite at coordinate (VX, VY)
-                    (0xE,   _, 0x9, 0xE) => self.op_ex9e(x), // EX9E KeyOp - Skip if key pressed
-                    (0xE,   _, 0xA, 0x1) => self.op_exa1(x), // EXA1 KeyOp - Skip if not pressed
-                    (0xF,   _, 0x0, 0x7) => self.op_fx07(x), // FX07 Timer - Sets VX to the value of the delay timer
-                    (0xF,   _, 0x0, 0xA) => self.op_fx0a(x), // FX0A KeyOp - A key press is awaited and then stored in VX (blocking operation)
-                    (0xF,   _, 0x1, 0x5) => self.op_fx15(x), // FX15 Timer - Sets the delay timer to VX
-                    (0xF,   _, 0x1, 0x8) => self.op_fx18(x), // FX18 Timer - Sets the sound timer to VX
-                    (0xF,   _, 0x1, 0xE) => self.op_fx1e(x), // FX1E MEM - Adds VX to I.
-                    (0xF,   _, 0x2, 0x9) => self.op_fx29(x), // FX29 MEM - Sets I to the location of the sprite for the character in VX
-                    (0xF,   _, 0x3, 0x3) => self.op_fx33(x), // FX33 BCD - Stores the binary-coded decimal representation of VX in memory using the index register
-                    (0xF,   _, 0x5, 0x5) => self.op_fx55(x), // FX55 MEM - Stores V0 to VX in memory, starting at address I
-                    (0xF,   _, 0x6, 0x5) => self.op_fx65(x), // FX65 MEM - Loads V0 to VX from memory, starting at address I
+                    (0x0, 0x1, _, _) => self.op_0nnn(), // 0NNN Call - Calls a machine code routine
+                    (0x1, _, _, _) => self.op_1nnn(nnn), // 1NNN Flow - Goto NNN
+                    (0x2, _, _, _) => self.op_2nnn(nnn), // 2NNN Flow - Calls subroutine at NNN
+                    (0x3, _, _, _) => self.op_3xnn(x, nn), // 3XNN Cond - Skips the next instruction if VX equals NN
+                    (0x4, _, _, _) => self.op_4xnn(x, nn), // 4XNN Cond - Skips the next instruction if VX does not equal NN
+                    (0x5, _, _, _) => self.op_5xy0(x, y), // 5XY0 Cond - Skips the next instruction if VX equals VY
+                    (0x6, _, _, _) => self.op_6xnn(x, nn), // 6XNN Const - Set VX to NN
+                    (0x7, _, _, _) => self.op_7xnn(x, nn), // 7XNN Const - Adds NN to VX
+                    (0x8, _, _, 0x0) => self.op_8xy0(x, y), // 8XY0 Assign - Sets VX to the value of VY
+                    (0x8, _, _, 0x1) => self.op_8xy1(x, y), // 8XY1 BitOp - Sets VX to VX | VY
+                    (0x8, _, _, 0x2) => self.op_8xy2(x, y), // 8XY2 BitOp - Sets VX to VX & VY
+                    (0x8, _, _, 0x3) => self.op_8xy3(x, y), // 8XY3 BitOp - Sets VX to VX ^ VY
+                    (0x8, _, _, 0x4) => self.op_8xy4(x, y), // 8XY4 Math - Adds VY to VX, setting VF if there's an overflow
+                    (0x8, _, _, 0x5) => self.op_8xy5(x, y), // 8XY5 Math - Subtracts VY from VX. Sets VF to 0 if underflow, 1 otherwise
+                    (0x8, _, _, 0x6) => self.op_8xy6(x), // 8XY6 BitOp - Shifts VX to the right by 1, setting VF to the shifted bit
+                    (0x8, _, _, 0x7) => self.op_8xy7(x, y), // 8XY7 Math - Sets VX to VY - VX. Sets VF to 0 if underflow, 1 otherwise
+                    (0x8, _, _, 0xE) => self.op_8xye(x), // 8XYE BitOp - Shifts VX to the left by 1, setting VF to the shifted bit
+                    (0x9, _, _, _) => self.op_9xy0(x, y), // 9XY0 Cond - Skips the next instruction if VX does not equal VY
+                    (0xA, _, _, _) => self.op_annn(nnn), // ANNN MEM - Sets the I to the address NNN
+                    (0xB, _, _, _) => self.op_bnnn(x, nnn), // BNNN Flow - Jumps to the address NNN + V0
+                    (0xC, _, _, _) => self.op_cxnn(x, nn), // CXNN Rand - Sets VX to the result of a bitwise AND operation on a random u8 number and NN
+                    (0xD, _, _, _) => self.op_dxyn(x, y, n), // DXYN Display - Draws a sprite at coordinate (VX, VY)
+                    (0xE, _, 0x9, 0xE) => self.op_ex9e(x),   // EX9E KeyOp - Skip if key pressed
+                    (0xE, _, 0xA, 0x1) => self.op_exa1(x),   // EXA1 KeyOp - Skip if not pressed
+                    (0xF, _, 0x0, 0x7) => self.op_fx07(x), // FX07 Timer - Sets VX to the value of the delay timer
+                    (0xF, _, 0x0, 0xA) => self.op_fx0a(x), // FX0A KeyOp - A key press is awaited and then stored in VX (blocking operation)
+                    (0xF, _, 0x1, 0x5) => self.op_fx15(x), // FX15 Timer - Sets the delay timer to VX
+                    (0xF, _, 0x1, 0x8) => self.op_fx18(x), // FX18 Timer - Sets the sound timer to VX
+                    (0xF, _, 0x1, 0xE) => self.op_fx1e(x), // FX1E MEM - Adds VX to I.
+                    (0xF, _, 0x2, 0x9) => self.op_fx29(x), // FX29 MEM - Sets I to the location of the sprite for the character in VX
+                    (0xF, _, 0x3, 0x3) => self.op_fx33(x), // FX33 BCD - Stores the binary-coded decimal representation of VX in memory using the index register
+                    (0xF, _, 0x5, 0x5) => self.op_fx55(x), // FX55 MEM - Stores V0 to VX in memory, starting at address I
+                    (0xF, _, 0x6, 0x5) => self.op_fx65(x), // FX65 MEM - Loads V0 to VX from memory, starting at address I
                     _ => eprintln!("Unrecognized instruction: {instruction:#04X}"),
                 }
-    
-                // redraw screen
-                for bit in 0..(SCREEN_WIDTH * SCREEN_HEIGHT) {
-                    let (x, y) = Self::flat_to_screen(bit);
-                    
-                    if self.screen.contains(bit) {
-                        image.set_pixel(x as u32, y as u32, WHITE);
-                    }
-                    else {
-                        image.set_pixel(x as u32, y as u32, BLACK);
-                    }
-                }   
+
+                self.redraw_screen(&mut image);
             }
 
             // Redraw the window graphics
             clear_background(BLACK);
 
             texture.update(&image);
-            draw_texture_ex(&texture, 0.0, 0.0, WHITE, DrawTextureParams {
-                dest_size: Some(Vec2 { x: screen_width(), y: screen_height() }),
-                source: None,
-                rotation: 0.0,
-                flip_x: false,
-                flip_y: false,
-                pivot: None,
-            });
-            
+            draw_texture_ex(
+                &texture,
+                0.0,
+                0.0,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2 {
+                        x: screen_width(),
+                        y: screen_height(),
+                    }),
+                    source: None,
+                    rotation: 0.0,
+                    flip_x: false,
+                    flip_y: false,
+                    pivot: None,
+                },
+            );
+
             next_frame().await;
+        }
+    }
+
+    fn redraw_screen(&mut self, image: &mut Image) {
+        for bit in 0..(SCREEN_WIDTH * SCREEN_HEIGHT) {
+            let (x, y) = Self::flat_to_screen(bit);
+
+            if self.screen.contains(bit) {
+                image.set_pixel(x as u32, y as u32, WHITE);
+            } else {
+                image.set_pixel(x as u32, y as u32, BLACK);
+            }
         }
     }
 
@@ -252,19 +263,19 @@ impl Emulator {
         self.awaiting_keypress = true;
         self.awaiting_keypress_register = x;
     }
-    
+
     fn op_fx65(&mut self, x: usize) {
         for register in 0..=x {
             self.registers[register] = self.memory[self.index_register + register];
         }
     }
-    
+
     fn op_fx55(&mut self, x: usize) {
         for register in 0..=x {
             self.memory[self.index_register + register] = self.registers[register];
         }
     }
-    
+
     fn op_fx33(&mut self, x: usize) {
         let hundreds = self.registers[x] / 100;
         let tens = self.registers[x] / 10 % 10;
@@ -273,151 +284,173 @@ impl Emulator {
         self.memory[self.index_register + 1] = tens;
         self.memory[self.index_register + 2] = ones;
     }
-    
+
     fn op_fx29(&mut self, x: usize) {
         self.index_register = FONT_LOAD_INDEX + (x * 5)
     }
-    
+
     fn op_fx1e(&mut self, x: usize) {
         self.index_register += self.registers[x] as usize
     }
-    
+
     fn op_fx18(&mut self, x: usize) {
         self.sound_timer = self.registers[x]
     }
-    
+
     fn op_fx15(&mut self, x: usize) {
         self.delay_timer = self.registers[x]
     }
-    
+
     fn op_fx07(&mut self, x: usize) {
         self.registers[x] = self.delay_timer
     }
-    
+
     fn op_exa1(&mut self, x: usize) {
         if !self.key_states[self.registers[x] as usize] {
             self.program_counter += 2;
         }
     }
-    
+
     fn op_ex9e(&mut self, x: usize) {
         if self.key_states[self.registers[x] as usize] {
             self.program_counter += 2;
         }
     }
-    
+
     fn op_dxyn(&mut self, x: usize, y: usize, n: u8) {
         let x_coord = self.registers[x] % SCREEN_WIDTH as u8;
         let y_coord = self.registers[y] % SCREEN_HEIGHT as u8;
         let height = n;
         self.draw(x_coord, y_coord, height);
     }
-    
+
     fn op_cxnn(&mut self, x: usize, nn: u8) {
         let num = random_range(0..=255) as u8;
         self.registers[x] = num & nn;
     }
-    
+
     fn op_bnnn(&mut self, x: usize, nnn: usize) {
-        // TODO: Make configurable
+        // This op behaves differently in CHIP-8 vs. CHIP-48/SUPER-CHIP.
         // Original CHIP-8 behavior:
         // self.program_counter = nnn + self.registers[0] as usize;
-        // CHIP-48/SUPER-CHIP
+
+        // CHIP-48/SUPER-CHIP:
         self.program_counter = nnn + self.registers[x] as usize;
     }
-    
+
     fn op_annn(&mut self, nnn: usize) {
         self.index_register = nnn
     }
-    
+
     fn op_9xy0(&mut self, x: usize, y: usize) {
-        if self.registers[x] != self.registers[y] { self.program_counter += 2; }
+        if self.registers[x] != self.registers[y] {
+            self.program_counter += 2;
+        }
     }
-    
+
     fn op_8xye(&mut self, x: usize) {
-        // TODO: the following line is a quirk on some systems, make it configurable
+        // The following line is a quirk on some systems, and could be made into a toggleable
+        // option to enable a running roms which require this behavior:
         // self.registers[x] = self.registers[y];
         let vf_result = (self.registers[x] >> 7) & 1;
         self.registers[x] <<= 1;
         self.registers[0xF] = vf_result;
     }
-    
+
     fn op_8xy7(&mut self, x: usize, y: usize) {
-        let vf_result = if self.registers[y] >= self.registers[x] { 1 } else { 0 };
+        let vf_result = if self.registers[y] >= self.registers[x] {
+            1
+        } else {
+            0
+        };
         self.registers[x] = self.registers[y].wrapping_sub(self.registers[x]);
         self.registers[0xF] = vf_result;
     }
-    
+
     fn op_8xy6(&mut self, x: usize) {
         let vf_result = self.registers[x] & 1;
         self.registers[x] >>= 1;
         self.registers[0xF] = vf_result;
     }
-    
+
     fn op_8xy5(&mut self, x: usize, y: usize) {
-        let vf_result = if self.registers[x] >= self.registers[y] { 1 } else { 0 };
+        let vf_result = if self.registers[x] >= self.registers[y] {
+            1
+        } else {
+            0
+        };
         self.registers[x] = self.registers[x].wrapping_sub(self.registers[y]);
         self.registers[0xF] = vf_result;
     }
-    
+
     fn op_8xy4(&mut self, x: usize, y: usize) {
         let result = self.registers[x] as u16 + self.registers[y] as u16;
         self.registers[x] = self.registers[x].wrapping_add(self.registers[y]);
-        self.registers[0xF] =  if result > 0xFF { 1 } else { 0 };
+        self.registers[0xF] = if result > 0xFF { 1 } else { 0 };
     }
-    
+
     fn op_8xy3(&mut self, x: usize, y: usize) {
-        self.registers[x] = self.registers[x] ^ self.registers[y];
-        // self.registers[0xF] = 0; // Quirk for CHIP-8, make configurable
+        self.registers[x] ^= self.registers[y];
+        // self.registers[0xF] = 0; // Quirk for CHIP-8, could become a toggleable option
     }
-    
+
     fn op_8xy2(&mut self, x: usize, y: usize) {
-        self.registers[x] = self.registers[x] & self.registers[y];
-        // self.registers[0xF] = 0; // Quirk for CHIP-8, make configurable
+        self.registers[x] &= self.registers[y];
+        // self.registers[0xF] = 0; // Quirk for CHIP-8, could become a toggleable option
     }
-    
+
     fn op_8xy1(&mut self, x: usize, y: usize) {
-        self.registers[x] = self.registers[x] | self.registers[y];
-        // self.registers[0xF] = 0; // Quirk for CHIP-8, make configurable
+        self.registers[x] |= self.registers[y];
+        // self.registers[0xF] = 0; // Quirk for CHIP-8, could become a toggleable option
     }
-    
+
     fn op_8xy0(&mut self, x: usize, y: usize) {
         self.registers[x] = self.registers[y]
     }
-    
+
     fn op_7xnn(&mut self, x: usize, nn: u8) {
         self.registers[x] = self.registers[x].wrapping_add(nn)
     }
-    
+
     fn op_6xnn(&mut self, x: usize, nn: u8) {
         self.registers[x] = nn
     }
-    
+
     fn op_5xy0(&mut self, x: usize, y: usize) {
-        if self.registers[x] == self.registers[y] { self.program_counter += 2; }
+        if self.registers[x] == self.registers[y] {
+            self.program_counter += 2;
+        }
     }
-    
+
     fn op_4xnn(&mut self, x: usize, nn: u8) {
-        if self.registers[x] != nn { self.program_counter += 2; }
+        if self.registers[x] != nn {
+            self.program_counter += 2;
+        }
     }
-    
+
     fn op_3xnn(&mut self, x: usize, nn: u8) {
-        if self.registers[x] == nn { self.program_counter += 2; }
+        if self.registers[x] == nn {
+            self.program_counter += 2;
+        }
     }
-    
+
     fn op_2nnn(&mut self, nnn: usize) {
         self.stack.push(self.program_counter as u16);
         self.program_counter = nnn;
     }
-    
+
     fn op_1nnn(&mut self, nnn: usize) {
-        self.program_counter = nnn as usize
+        self.program_counter = nnn
     }
-    
+
     fn op_00ee(&mut self) {
-        self.program_counter = self.stack.pop().expect("stack should not be empty when returning from subroutine") as usize
+        self.program_counter = self
+            .stack
+            .pop()
+            .expect("stack should not be empty when returning from subroutine")
+            as usize
     }
-    
+
     fn op_00e0(&mut self) {
         self.screen.clear()
     }
@@ -425,7 +458,7 @@ impl Emulator {
     fn op_0nnn(&mut self) {
         panic!("Attempted to call machine code routine; not implemented.");
     }
-    
+
     fn draw(&mut self, x: u8, y: u8, height: u8) {
         self.registers[0xF] = 0;
 
@@ -455,18 +488,16 @@ impl Emulator {
                     if self.screen.contains(bit) {
                         self.screen.remove(bit);
                         self.registers[0xF] = 1; // on -> off sets VF
-                    }
-                    else {
+                    } else {
                         self.screen.insert(bit);
                     }
-                }
-                else if draw_v != 0 {
+                } else if draw_v != 0 {
                     panic!("Invalid draw value in draw.");
                 }
             }
         }
     }
-    
+
     fn get_awaited_key(&self) -> Option<u8> {
         for key_index in 0..self.key_states.len() {
             if self.key_states[key_index] {
@@ -485,27 +516,27 @@ impl Emulator {
         ((bit % SCREEN_WIDTH) as u8, (bit / SCREEN_WIDTH) as u8)
     }
 
-    // fn keycode_to_key_value(keycode: KeyCode) -> Option<u8> {
-    //     match keycode {
-    //         KeyCode::Key1 => Some(0x1),
-    //         KeyCode::Key2 => Some(0x2),
-    //         KeyCode::Key3 => Some(0x3),
-    //         KeyCode::Key4 => Some(0xC),
-    //         KeyCode::Q    => Some(0x4),
-    //         KeyCode::W    => Some(0x5),
-    //         KeyCode::E    => Some(0x6),
-    //         KeyCode::R    => Some(0xD),
-    //         KeyCode::A    => Some(0x7),
-    //         KeyCode::S    => Some(0x8),
-    //         KeyCode::D    => Some(0x9),
-    //         KeyCode::F    => Some(0xE),
-    //         KeyCode::Z    => Some(0xA),
-    //         KeyCode::X    => Some(0x0),
-    //         KeyCode::C    => Some(0xB),
-    //         KeyCode::V    => Some(0xF),
-    //         _ => None,
-    //     }
-    // }
+    fn keycode_to_key_value(keycode: KeyCode) -> Option<u8> {
+        match keycode {
+            KeyCode::Key1 => Some(0x1),
+            KeyCode::Key2 => Some(0x2),
+            KeyCode::Key3 => Some(0x3),
+            KeyCode::Key4 => Some(0xC),
+            KeyCode::Q => Some(0x4),
+            KeyCode::W => Some(0x5),
+            KeyCode::E => Some(0x6),
+            KeyCode::R => Some(0xD),
+            KeyCode::A => Some(0x7),
+            KeyCode::S => Some(0x8),
+            KeyCode::D => Some(0x9),
+            KeyCode::F => Some(0xE),
+            KeyCode::Z => Some(0xA),
+            KeyCode::X => Some(0x0),
+            KeyCode::C => Some(0xB),
+            KeyCode::V => Some(0xF),
+            _ => None,
+        }
+    }
 
     fn key_value_to_keycode(key_value: u8) -> Option<KeyCode> {
         match key_value {
@@ -525,8 +556,13 @@ impl Emulator {
             0x0 => Some(KeyCode::X),
             0xB => Some(KeyCode::C),
             0xF => Some(KeyCode::V),
-            _ => None
+            _ => None,
         }
     }
 }
 
+impl Default for Emulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
